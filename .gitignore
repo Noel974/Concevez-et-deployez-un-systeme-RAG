@@ -1,0 +1,19 @@
+# Environnement virtuel
+rag-venv/
+
+# Données brutes et transformées
+data/
+
+# Fichiers FAISS
+*.bin
+*.pkl
+
+# Fichiers CSV générés
+*.csv
+
+# Cache Python
+__pycache__/
+*.pyc
+
+# Variables d’environnement
+.env
