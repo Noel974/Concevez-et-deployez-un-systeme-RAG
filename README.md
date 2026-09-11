@@ -45,5 +45,5 @@ Activation de l'environnement
 ```bash
 .rag-venv\Scripts\activate
 ```
-
 #### Deroulement 
+Création des scripts test , index, aganda, query , 

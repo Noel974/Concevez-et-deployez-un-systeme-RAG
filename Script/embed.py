@@ -1,117 +1,167 @@
+"""
+Script de vectorisation des événements pour le pipeline RAG.
+"""
+
 import sys
 import os
 
-# Ajouter le dossier racine au PYTHONPATH
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(ROOT_DIR)
-
 
 import pandas as pd
 from utils.mistral import embed_texts
 
 
-EVENTS_FILE = "data/processed/events.csv"
-VECTORS_FILE = "data/processed/events_vectors.pkl"
+# ---------------------------------------------------------
+# Chemins
+# ---------------------------------------------------------
+
+EVENTS_FILE = os.path.join(
+    ROOT_DIR,
+    "data",
+    "processed",
+    "events.csv"
+)
+
+VECTORS_FILE = os.path.join(
+    ROOT_DIR,
+    "data",
+    "processed",
+    "events_vectors.pkl"
+)
 
 
-# --- Charger les événements ---
+# ---------------------------------------------------------
+# Chargement des événements
+# ---------------------------------------------------------
+
 df = pd.read_csv(EVENTS_FILE)
 
 print("Nombre total d'événements :", len(df))
 
 
-# ==================================================
-# Charger les anciens embeddings s'ils existent
-# ==================================================
+# Vérification du fichier events.csv
+if "uid" not in df.columns:
+    raise ValueError(
+        "Erreur : la colonne 'uid' est absente de events.csv."
+    )
+
+if "text_for_embedding" not in df.columns:
+    raise ValueError(
+        "Erreur : la colonne 'text_for_embedding' est absente de events.csv."
+    )
+
+
+# ---------------------------------------------------------
+# Chargement des anciennes vectorisations
+# ---------------------------------------------------------
+
+old_vectors = pd.DataFrame()
 
 if os.path.exists(VECTORS_FILE):
 
-    old_vectors = pd.read_pickle(VECTORS_FILE)
+    try:
+        old_vectors = pd.read_pickle(VECTORS_FILE)
 
-    print(
-        "Anciennes vectorisations trouvées :",
-        len(old_vectors)
-    )
+        print(
+            "Anciennes vectorisations trouvées :",
+            len(old_vectors)
+        )
+
+        # Vérifier que le pickle contient bien les colonnes nécessaires
+        if (
+            old_vectors.empty
+            or "uid" not in old_vectors.columns
+            or "vector" not in old_vectors.columns
+        ):
+            print(
+                "Ancien fichier de vecteurs invalide ou vide."
+            )
+
+            # On repart de zéro
+            old_vectors = pd.DataFrame()
+
+    except Exception as e:
+
+        print(
+            "Impossible de lire l'ancien fichier de vecteurs :",
+            e
+        )
+
+        old_vectors = pd.DataFrame()
 
 
-    # Trouver les nouveaux événements
-    new_events = df[
-        ~df["uid"].isin(old_vectors["uid"])
-    ]
+# ---------------------------------------------------------
+# Identifier les nouveaux événements
+# ---------------------------------------------------------
 
+if old_vectors.empty:
+
+    new_events = df.copy()
 
 else:
 
-    print("Aucun embedding existant.")
-
-    old_vectors = pd.DataFrame()
-
-    new_events = df
+    new_events = df[
+        ~df["uid"].isin(old_vectors["uid"])
+    ].copy()
 
 
+print(
+    "Nouveaux événements à vectoriser :",
+    len(new_events)
+)
 
-# ==================================================
-# Vectoriser uniquement les nouveaux événements
-# ==================================================
+
+# ---------------------------------------------------------
+# Vectorisation
+# ---------------------------------------------------------
 
 if len(new_events) > 0:
-
-    print(
-        "Nouveaux événements à vectoriser :",
-        len(new_events)
-    )
-
 
     vectors = embed_texts(
         new_events["text_for_embedding"].tolist()
     )
 
-
-    new_events = new_events.copy()
-
     new_events["vector"] = vectors
 
 
-else:
+# ---------------------------------------------------------
+# Fusion avec les anciennes vectorisations
+# ---------------------------------------------------------
 
-    print("Aucun nouvel événement.")
-
-    new_events = pd.DataFrame()
-
-
-
-# ==================================================
-# Fusion ancien + nouveau
-# ==================================================
-
-if not old_vectors.empty:
-
-    df_vectors = pd.concat(
-        [
-            old_vectors,
-            new_events
-        ],
-        ignore_index=True
-    )
-
-else:
+if old_vectors.empty:
 
     df_vectors = new_events
 
+elif new_events.empty:
+
+    df_vectors = old_vectors
+
+else:
+
+    df_vectors = pd.concat(
+        [old_vectors, new_events],
+        ignore_index=True
+    )
 
 
-# Supprimer les doublons éventuels
-df_vectors = df_vectors.drop_duplicates(
-    subset=["uid"],
-    keep="last"
-)
+# ---------------------------------------------------------
+# Suppression des doublons
+# ---------------------------------------------------------
+
+if not df_vectors.empty:
+
+    df_vectors = df_vectors.drop_duplicates(
+        subset=["uid"],
+        keep="last"
+    )
 
 
+# ---------------------------------------------------------
+# Sauvegarde
+# ---------------------------------------------------------
 
-# --- Sauvegarde ---
-df_vectors.to_pickle(
-    VECTORS_FILE
-)
+df_vectors.to_pickle(VECTORS_FILE)
 
 
 print("--------------------------------")
@@ -119,104 +169,8 @@ print(
     "Nombre total de vecteurs :",
     len(df_vectors)
 )
-
 print(
-    "Sauvegardé dans :","""
-Script de vectorisation des événements pour le pipeline RAG.
-
-Ce module :
-- charge les événements pré‑processés depuis events.csv,
-- détecte les événements déjà vectorisés (via events_vectors.pkl),
-- vectorise uniquement les nouveaux événements grâce à la fonction embed_texts(),
-- fusionne les anciens et nouveaux vecteurs,
-- supprime les doublons,
-- sauvegarde le fichier final events_vectors.pkl.
-
-Ce script constitue l'étape 2 du pipeline RAG :
-1. ingestion & pré-processing (agenda.py)
-2. vectorisation (embed.py)
-3. indexation FAISS (index.py)
-"""
-
-import sys
-import os
-
-# Ajouter le dossier racine au PYTHONPATH
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(ROOT_DIR)
-
-import pandas as pd
-from utils.mistral import embed_texts
-
-
-EVENTS_FILE = "data/processed/events.csv"
-VECTORS_FILE = "data/processed/events_vectors.pkl"
-
-
-# --- Charger les événements ---
-df = pd.read_csv(EVENTS_FILE)
-print("Nombre total d'événements :", len(df))
-
-
-# ==================================================
-# Charger les anciens embeddings s'ils existent
-# ==================================================
-
-if os.path.exists(VECTORS_FILE):
-
-    old_vectors = pd.read_pickle(VECTORS_FILE)
-    print("Anciennes vectorisations trouvées :", len(old_vectors))
-
-    # Trouver les nouveaux événements
-    new_events = df[~df["uid"].isin(old_vectors["uid"])]
-
-else:
-
-    print("Aucun embedding existant.")
-    old_vectors = pd.DataFrame()
-    new_events = df
-
-
-# ==================================================
-# Vectoriser uniquement les nouveaux événements
-# ==================================================
-
-if len(new_events) > 0:
-
-    print("Nouveaux événements à vectoriser :", len(new_events))
-
-    vectors = embed_texts(new_events["text_for_embedding"].tolist())
-
-    new_events = new_events.copy()
-    new_events["vector"] = vectors
-
-else:
-
-    print("Aucun nouvel événement.")
-    new_events = pd.DataFrame()
-
-
-# ==================================================
-# Fusion ancien + nouveau
-# ==================================================
-
-if not old_vectors.empty:
-    df_vectors = pd.concat([old_vectors, new_events], ignore_index=True)
-else:
-    df_vectors = new_events
-
-# Supprimer les doublons éventuels
-df_vectors = df_vectors.drop_duplicates(subset=["uid"], keep="last")
-
-
-# --- Sauvegarde ---
-df_vectors.to_pickle(VECTORS_FILE)
-
-print("--------------------------------")
-print("Nombre total de vecteurs :", len(df_vectors))
-print("Sauvegardé dans :", VECTORS_FILE)
-print("--------------------------------")
-
+    "Sauvegardé dans :",
     VECTORS_FILE
 )
 print("--------------------------------")
