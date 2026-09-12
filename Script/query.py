@@ -1,221 +1,160 @@
-"""
-Chatbot RAG pour les événements.
-
-Pipeline :
-
-Question utilisateur
-        ↓
-Détection éventuelle de la ville
-        ↓
-Embedding de la question
-        ↓
-Recherche FAISS
-        ↓
-Filtrage par ville
-        ↓
-Construction du contexte
-        ↓
-Mistral
-        ↓
-Réponse
-"""
-
 import os
-import re
-
 import pandas as pd
 import numpy as np
 import faiss
 
-from dotenv import load_dotenv
-
 from langchain_mistralai.chat_models import ChatMistralAI
 from langchain_mistralai.embeddings import MistralAIEmbeddings
+from dotenv import load_dotenv
 
 
 # ============================================================
-# 1. ENVIRONNEMENT
+# CONFIGURATION
 # ============================================================
 
 load_dotenv()
 
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+FAISS_PATH = "data/processed/faiss_index.bin"
+DATA_PATH = "data/processed/events_with_vectors.pkl"
 
-if not MISTRAL_API_KEY:
+
+# ============================================================
+# CHARGEMENT DE FAISS
+# ============================================================
+
+if not os.path.exists(FAISS_PATH):
+    raise FileNotFoundError(
+        f"Index FAISS introuvable : {FAISS_PATH}"
+    )
+
+index = faiss.read_index(FAISS_PATH)
+
+
+# ============================================================
+# CHARGEMENT DES DONNÉES
+# ============================================================
+
+if not os.path.exists(DATA_PATH):
+    raise FileNotFoundError(
+        f"Fichier de métadonnées introuvable : {DATA_PATH}"
+    )
+
+df = pd.read_pickle(DATA_PATH)
+
+print(
+    f"Nombre d'événements chargés : {len(df)}"
+)
+
+
+# ============================================================
+# VÉRIFICATION DES DONNÉES
+# ============================================================
+
+required_columns = [
+    "title_fr",
+    "description_fr",
+    "location_city",
+    "firstdate_begin"
+]
+
+missing_columns = [
+    column
+    for column in required_columns
+    if column not in df.columns
+]
+
+if missing_columns:
+
     raise ValueError(
-        "MISTRAL_API_KEY est absente du fichier .env"
+        "Colonnes manquantes : "
+        + ", ".join(missing_columns)
     )
 
 
 # ============================================================
-# 2. CHEMINS
+# NETTOYAGE DES VILLES
 # ============================================================
 
-ROOT_DIR = os.path.dirname(
-    os.path.dirname(
-        os.path.abspath(__file__)
-    )
-)
-
-INDEX_PATH = os.path.join(
-    ROOT_DIR,
-    "data",
-    "processed",
-    "faiss_index.bin"
-)
-
-META_PATH = os.path.join(
-    ROOT_DIR,
-    "data",
-    "processed",
-    "events_with_vectors.pkl"
+df["location_city"] = (
+    df["location_city"]
+    .fillna("")
+    .astype(str)
+    .str.strip()
 )
 
 
 # ============================================================
-# 3. VÉRIFICATIONS
-# ============================================================
-
-if not os.path.exists(INDEX_PATH):
-
-    raise FileNotFoundError(
-        f"Index FAISS introuvable : {INDEX_PATH}\n"
-        "Lance d'abord : python Script/index.py"
-    )
-
-
-if not os.path.exists(META_PATH):
-
-    raise FileNotFoundError(
-        f"Métadonnées introuvables : {META_PATH}\n"
-        "Lance d'abord : python Script/index.py"
-    )
-
-
-# ============================================================
-# 4. CHARGEMENT FAISS
-# ============================================================
-
-print("Chargement de l'index FAISS...")
-
-index = faiss.read_index("data/processed/faiss_index.bin")
-
-# --- Charger les métadonnées ---
-df = pd.read_pickle("data/processed/events_with_vectors.pkl")
-
-print(
-    "Nombre de vecteurs FAISS :",
-    index.ntotal
-)
-
-
-# ============================================================
-# 5. CHARGEMENT DES MÉTADONNÉES
-# ============================================================
-
-df = pd.read_pickle(
-    META_PATH
-)
-
-print(
-    "Nombre d'événements :",
-    len(df)
-)
-
-
-# ============================================================
-# 6. EMBEDDINGS
+# EMBEDDINGS MISTRAL
 # ============================================================
 
 embedder = MistralAIEmbeddings(
     model="mistral-embed",
-    mistral_api_key=MISTRAL_API_KEY
+    mistral_api_key=os.getenv(
+        "MISTRAL_API_KEY"
+    )
 )
 
 
 # ============================================================
-# 7. MODÈLE MISTRAL
+# MODÈLE MISTRAL
 # ============================================================
 
 llm = ChatMistralAI(
-    model="mistral-small-latest",
-    mistral_api_key=MISTRAL_API_KEY,
-    temperature=0
+    model="open-mistral-7b",
+    mistral_api_key=os.getenv(
+        "MISTRAL_API_KEY"
+    )
 )
 
 
 # ============================================================
-# 8. NORMALISER LES VILLES
+# LISTE DES VILLES
 # ============================================================
 
-def normalize_text(text):
-    """
-    Normalise un texte pour faciliter les comparaisons.
-    """
+CITIES = (
+    df["location_city"]
+    .replace("", pd.NA)
+    .dropna()
+    .unique()
+    .tolist()
+)
 
-    text = str(text).lower().strip()
-
-    replacements = {
-        "é": "e",
-        "è": "e",
-        "ê": "e",
-        "ë": "e",
-        "à": "a",
-        "â": "a",
-        "ä": "a",
-        "î": "i",
-        "ï": "i",
-        "ô": "o",
-        "ö": "o",
-        "ù": "u",
-        "û": "u",
-        "ü": "u",
-        "ç": "c",
-    }
-
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-
-    return text
+# Les villes les plus longues d'abord
+# Exemple : "Saint-Pierre" avant "Pierre"
+CITIES = sorted(
+    CITIES,
+    key=len,
+    reverse=True
+)
 
 
 # ============================================================
-# 9. DÉTECTER LA VILLE
+# DÉTECTION DE LA VILLE
 # ============================================================
 
-def detect_city(question):
+def detect_city(query):
     """
-    Cherche une ville présente dans les données
-    directement dans la question.
+    Détecte une ville présente dans la question.
+
+    Exemple :
+        "Quel événement sur Lyon ?"
+        -> Lyon
+
+        "Quels événements à Saint-Pierre ?"
+        -> Saint-Pierre
     """
 
-    question_normalized = normalize_text(
-        question
+    query_lower = (
+        query
+        .lower()
+        .strip()
     )
 
-    cities = (
-        df["location_city"]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-    )
+    for city in CITIES:
 
-    # Trier par longueur décroissante
-    # pour tester les noms les plus précis d'abord
-    cities = sorted(
-        cities,
-        key=len,
-        reverse=True
-    )
+        city_lower = city.lower()
 
-    for city in cities:
-
-        city_normalized = normalize_text(
-            city
-        )
-
-        if city_normalized in question_normalized:
+        if city_lower in query_lower:
 
             return city
 
@@ -223,49 +162,18 @@ def detect_city(question):
 
 
 # ============================================================
-# 10. RECHERCHE FAISS
+# RECHERCHE FAISS
 # ============================================================
 
-def search_events(
-    query,
-    k=5
-):
-
+def search_events(query, k=10):
     """
-    Recherche les événements les plus proches
-    avec FAISS.
+    Recherche sémantique avec FAISS.
     """
-
-    if index.ntotal == 0:
-
-        return pd.DataFrame()
-
-    # Ne jamais demander plus de résultats
-    # que le nombre de vecteurs disponibles
-    k = min(
-        k,
-        index.ntotal
-    )
-
-    # --------------------------------------------------------
-    # Embedding de la question
-    # --------------------------------------------------------
-
-    q_vec = embedder.embed_query(
-        query
-    )
 
     q_vec = np.array(
-        q_vec,
+        embedder.embed_query(query),
         dtype="float32"
-    ).reshape(
-        1,
-        -1
-    )
-
-    # --------------------------------------------------------
-    # Recherche FAISS
-    # --------------------------------------------------------
+    ).reshape(1, -1)
 
     distances, indices = index.search(
         q_vec,
@@ -275,60 +183,169 @@ def search_events(
     valid_indices = [
         i
         for i in indices[0]
-        if i >= 0
+        if 0 <= i < len(df)
     ]
 
     if not valid_indices:
-
         return pd.DataFrame()
 
     results = df.iloc[
         valid_indices
     ].copy()
 
-    results["distance"] = distances[0][
-        :len(results)
-    ]
-
     return results
 
 
 # ============================================================
-# 11. FILTRAGE PAR VILLE
+# RECHERCHE INTELLIGENTE
 # ============================================================
 
-def filter_by_city(
-    results,
-    city
+def search_events_smart(
+    query,
+    k=5
 ):
+    """
+    Recherche hybride :
 
+    1. Détection de la ville.
+    2. Recherche FAISS.
+    3. Filtrage strict sur la ville.
+    4. Tri par date.
+    5. Retour des k premiers résultats.
     """
-    Filtre les résultats sur la ville demandée.
-    """
+
+    city = detect_city(query)
+
+    print(
+        f"\n🔎 Ville détectée : {city}"
+    )
+
+    # --------------------------------------------------------
+    # CAS 1 : aucune ville détectée
+    # --------------------------------------------------------
 
     if city is None:
+
+        results = search_events(
+            query,
+            k=k
+        )
+
         return results
 
-    city_normalized = normalize_text(
-        city
+
+    # --------------------------------------------------------
+    # CAS 2 : ville détectée
+    # --------------------------------------------------------
+
+    # On récupère beaucoup plus de résultats
+    # afin d'avoir de meilleures chances de trouver
+    # tous les événements de la ville.
+    faiss_results = search_events(
+        query,
+        k=100
     )
 
-    mask = results[
-        "location_city"
-    ].fillna("").apply(
-        lambda x:
-        normalize_text(x) == city_normalized
-    )
 
-    filtered = results[
-        mask
+    # --------------------------------------------------------
+    # FILTRE STRICT SUR LA VILLE
+    # --------------------------------------------------------
+
+    city_results = faiss_results[
+        faiss_results["location_city"]
+        .str.lower()
+        == city.lower()
     ].copy()
 
-    return filtered
+
+    # --------------------------------------------------------
+    # SI DES ÉVÉNEMENTS SONT TROUVÉS
+    # --------------------------------------------------------
+
+    if not city_results.empty:
+
+        print(
+            f"✅ {len(city_results)} événement(s) "
+            f"trouvé(s) à {city}"
+        )
+
+        # Conversion des dates
+        city_results["firstdate_begin"] = (
+            pd.to_datetime(
+                city_results["firstdate_begin"],
+                errors="coerce",
+                utc=True
+            )
+        )
+
+        # Trier par date
+        city_results = (
+            city_results
+            .sort_values(
+                "firstdate_begin"
+            )
+        )
+
+        return city_results.head(k)
+
+
+    # --------------------------------------------------------
+    # CAS 3 : FAISS n'a pas trouvé la ville
+    # --------------------------------------------------------
+
+    print(
+        f"⚠️ Aucun événement de {city} "
+        f"dans les résultats FAISS."
+    )
+
+
+    # Recherche directe dans les métadonnées
+    direct_results = df[
+        df["location_city"]
+        .str.lower()
+        == city.lower()
+    ].copy()
+
+
+    if not direct_results.empty:
+
+        print(
+            f"✅ {len(direct_results)} événement(s) "
+            f"trouvé(s) directement dans la base "
+            f"pour {city}"
+        )
+
+        direct_results[
+            "firstdate_begin"
+        ] = pd.to_datetime(
+            direct_results["firstdate_begin"],
+            errors="coerce",
+            utc=True
+        )
+
+        direct_results = (
+            direct_results
+            .sort_values(
+                "firstdate_begin"
+            )
+        )
+
+        return direct_results.head(k)
+
+
+    # --------------------------------------------------------
+    # CAS 4 : aucun événement
+    # --------------------------------------------------------
+
+    print(
+        f"❌ Aucun événement trouvé à {city}"
+    )
+
+    return pd.DataFrame()
 
 
 # ============================================================
-# 12. CONSTRUIRE LE CONTEXTE
+# CONSTRUCTION DU CONTEXTE
 # ============================================================
 
 def build_context(results):
@@ -337,15 +354,19 @@ def build_context(results):
 
         return (
             "Aucun événement correspondant "
-            "n'a été trouvé."
+            "n'a été trouvé dans la base."
         )
 
     context = ""
 
-    for _, row in results.iterrows():
+    for i, (_, row) in enumerate(
+        results.iterrows(),
+        start=1
+    ):
 
         context += f"""
-### Événement
+
+### ÉVÉNEMENT {i}
 
 Titre :
 {row.get("title_fr", "")}
@@ -365,166 +386,30 @@ Date de fin :
 Description :
 {row.get("description_fr", "")}
 
+Mots-clés :
+{row.get("keywords_fr", "")}
+
 """
+
 
     return context
 
 
 # ============================================================
-# 13. APPEL MISTRAL
+# CHATBOT
 # ============================================================
 
-def generate_answer(
-    prompt
-):
-
-    """
-    Appelle Mistral une seule fois.
-
-    Si l'API retourne 429, on affiche une erreur
-    claire au lieu d'attendre plusieurs secondes.
-    """
-
-    try:
-
-        response = llm.invoke(
-            prompt
-        )
-
-        return response
-
-    except Exception as e:
-
-        error_message = str(e)
-
-        if (
-            "429" in error_message
-            or
-            "Rate limit" in error_message
-            or
-            "rate_limited" in error_message
-        ):
-
-            print(
-                "\n❌ L'API Mistral retourne une erreur 429."
-            )
-
-            print(
-                "La recherche FAISS fonctionne, "
-                "mais la génération Mistral est temporairement limitée."
-            )
-
-            print(
-                "Vérifie Usage / Limits sur ton compte Mistral."
-            )
-
-            return None
-
-        raise
-
-
-# ============================================================
-# 14. CHATBOT
-# ============================================================
-
-def ask_chatbot(
-    question
-):
+def ask_chatbot(question):
 
     # --------------------------------------------------------
-    # Détecter la ville
+    # Recherche
     # --------------------------------------------------------
 
-    city = detect_city(
-        question
-    )
-
-    if city:
-
-        print(
-            f"\n📍 Ville détectée : {city}"
-        )
-
-    else:
-
-        print(
-            "\n📍 Aucune ville détectée"
-        )
-
-    # --------------------------------------------------------
-    # Recherche FAISS
-    # --------------------------------------------------------
-
-    results = search_events(
+    results = search_events_smart(
         question,
         k=5
     )
 
-    print(
-        f"🔎 Résultats FAISS : {len(results)}"
-    )
-
-    # --------------------------------------------------------
-    # Filtrer par ville
-    # --------------------------------------------------------
-
-    if city:
-
-        filtered_results = filter_by_city(
-            results,
-            city
-        )
-
-        # Si FAISS n'a pas ramené les événements
-        # de la ville demandée, chercher directement
-        # dans la base.
-
-        if filtered_results.empty:
-
-            print(
-                "⚠️ FAISS n'a trouvé aucun résultat "
-                "dans cette ville."
-            )
-
-            direct_results = df[
-                df["location_city"]
-                .fillna("")
-                .apply(
-                    lambda x:
-                    normalize_text(x)
-                    ==
-                    normalize_text(city)
-                )
-            ].copy()
-
-            results = direct_results
-
-        else:
-
-            results = filtered_results
-
-    # --------------------------------------------------------
-    # Affichage final
-    # --------------------------------------------------------
-
-    print(
-        f"📚 Événements retenus : {len(results)}"
-    )
-
-    for _, row in results.iterrows():
-
-        print(
-            f"  - {row.get('title_fr', '')}"
-            f" ({row.get('location_city', '')})"
-        )
-
-    # --------------------------------------------------------
-    # Aucun événement
-    # --------------------------------------------------------
-
-    if results.empty:
-
-        return None
 
     # --------------------------------------------------------
     # Contexte
@@ -534,77 +419,137 @@ def ask_chatbot(
         results
     )
 
+
     # --------------------------------------------------------
-    # Afficher le contexte pour debug
+    # Ville
     # --------------------------------------------------------
 
-    print(
-        "\n📖 CONTEXTE RAG :"
+    city = detect_city(
+        question
     )
 
-    print(
-        context
-    )
+
+    if city:
+
+        city_instruction = f"""
+
+La question concerne explicitement
+la ville de : {city}
+
+RÈGLE ABSOLUE :
+
+Tous les événements proposés doivent être
+situés à {city}.
+
+Ne propose aucun événement situé dans
+une autre ville.
+
+"""
+
+    else:
+
+        city_instruction = ""
+
 
     # --------------------------------------------------------
-    # Prompt
+    # PROMPT
     # --------------------------------------------------------
 
     prompt = f"""
+
 Tu es un assistant spécialisé dans les événements.
 
-Tu réponds uniquement à partir du CONTEXTE.
+Ta mission est de répondre à la question de
+l'utilisateur uniquement à partir des événements
+présents dans le contexte.
 
-Ne crée aucune information qui n'est pas présente
-dans le contexte.
+{city_instruction}
 
-Si plusieurs événements sont présents,
-présente-les tous de manière claire.
+RÈGLES :
 
-Si une ville est demandée, ne parle que des
-événements de cette ville.
+1. Utilise uniquement les informations du contexte.
 
-CONTEXTE :
+2. N'invente jamais d'événement.
+
+3. N'invente jamais une date, une ville ou une description.
+
+4. Si une ville est mentionnée dans la question,
+   respecte strictement cette ville.
+
+5. Si plusieurs événements correspondent,
+   présente-les sous forme de liste.
+
+6. Si aucun événement correspondant n'est présent,
+   dis simplement :
+   "Je n'ai trouvé aucun événement correspondant
+   dans la base."
+
+7. Ne dis jamais qu'une ville ne possède aucun
+   événement si un événement de cette ville
+   apparaît dans le contexte.
+
+8. Réponds en français.
+
+9. Pour chaque événement, indique :
+   - le titre
+   - la ville
+   - la date
+   - une courte description
+
+10. Sois clair et concis.
+
+============================================================
+CONTEXTE
+============================================================
 
 {context}
 
-QUESTION :
+============================================================
+QUESTION
+============================================================
 
 {question}
 
-RÉPONSE :
+============================================================
+RÉPONSE
+============================================================
+
 """
 
+
     # --------------------------------------------------------
-    # Mistral
+    # APPEL MISTRAL
     # --------------------------------------------------------
 
-    return generate_answer(
+    response = llm.invoke(
         prompt
     )
 
+    return response
+
 
 # ============================================================
-# 15. PROGRAMME PRINCIPAL
+# PROGRAMME PRINCIPAL
 # ============================================================
 
 if __name__ == "__main__":
 
     print(
-        "\n========================================"
+        "\n=========================================="
     )
 
     print(
-        "🤖 Chatbot RAG — Événements"
+        "🤖 Chatbot RAG — Événements dans le monde"
     )
 
     print(
-        "========================================"
+        "=========================================="
     )
 
     print(
-        "Tape 'exit' pour quitter.\n"
+        "Tape 'exit' ou 'quit' pour quitter.\n"
     )
+
 
     while True:
 
@@ -612,8 +557,9 @@ if __name__ == "__main__":
             "🧑‍💻 Ta question : "
         ).strip()
 
+
         # ----------------------------------------------------
-        # Quitter
+        # SORTIE
         # ----------------------------------------------------
 
         if question.lower() in [
@@ -622,52 +568,54 @@ if __name__ == "__main__":
         ]:
 
             print(
-                "Au revoir 👋"
+                "\nAu revoir 👋"
             )
 
             break
 
+
         # ----------------------------------------------------
-        # Question vide
+        # QUESTION VIDE
         # ----------------------------------------------------
 
         if not question:
 
             print(
-                "⚠️ Pose une question."
+                "⚠️ Veuillez entrer une question."
             )
 
             continue
 
+
         # ----------------------------------------------------
-        # RAG
+        # CHATBOT
         # ----------------------------------------------------
 
         try:
 
             answer = ask_chatbot(
                 question
+            ).content
+
+            print(
+                "\n🤖 Réponse :\n"
             )
 
-            if answer is not None:
+            print(
+                answer
+            )
 
-                print(
-                    "\n🤖 Réponse :\n"
-                )
-
-                print(
-                    answer.content
-                )
 
         except Exception as e:
 
             print(
-                "\n❌ Erreur :"
+                "\n❌ Une erreur est survenue :"
             )
 
             print(
-                e
+                str(e)
             )
+
 
         print(
             "\n" + "-" * 60 + "\n"
