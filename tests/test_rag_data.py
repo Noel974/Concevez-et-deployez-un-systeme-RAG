@@ -1,210 +1,132 @@
+"""
+tests/test_query_search.py — Vérifie le comportement réel de la recherche
+hybride (Script/query.py) plutôt que la pureté de tout le stockage brut.
+
+Contexte : la base vectorielle héberge volontairement plusieurs villes en
+même temps (architecture multi-villes assumée). La règle métier à tester
+n'est donc plus "toute la base ne contient qu'une ville", mais :
+
+    "Quand une ville est détectée dans la question, TOUS les événements
+     RETOURNÉS par search_events_smart() doivent appartenir à cette ville,
+     et dater de moins de DAYS_HISTORY jours."
+
+C'est le comportement que le prompt de ask_chatbot() promet à l'utilisateur
+("Ne propose aucun événement situé dans une autre ville") — ce test vérifie
+que cette promesse est bien tenue par le code, pas seulement par le prompt.
+
+L'appel réel à l'API Mistral (embedder.embed_query) est remplacé par un
+vecteur factice (monkeypatch) : on teste la logique de filtrage de
+search_events_smart, pas la qualité sémantique du modèle d'embedding, ce qui
+évite de dépendre du réseau et de consommer du quota API à chaque exécution
+des tests.
+"""
+
 import os
+import sys
+from datetime import datetime
+
+import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+import pytest
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT_DIR = os.path.join(ROOT_DIR, "Script")
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+import query as rag  # noqa: E402  (import après modification de sys.path)
+
+DAYS_HISTORY = int(os.getenv("DAYS_HISTORY", 365))
 
 
-VECTORS_FILE = "data/processed/events_with_vectors.pkl"
+@pytest.fixture
+def target_city():
+    """
+    Utilise une vraie ville présente dans les données chargées, plutôt
+    qu'une ville codée en dur — le test reste valable quelle que soit
+    la composition actuelle de la base.
+    """
+    if not rag.CITIES:
+        pytest.skip("Aucune ville détectée dans les données chargées.")
+    return rag.CITIES[0]
 
 
-def test_events_are_recent_and_in_region():
+@pytest.fixture(autouse=True)
+def fake_embeddings(monkeypatch):
+    """
+    Remplace l'appel réseau à Mistral par un vecteur déterministe (pas d'API, pas de coût).
 
-    # ========================================================
-    # CONFIGURATION
-    # ========================================================
+    Patché au niveau de la CLASSE (pas de l'instance rag.embedder) : MistralAIEmbeddings
+    est un modèle Pydantic qui interdit d'assigner un attribut arbitraire directement
+    sur une instance existante.
+    """
+    dimension = rag.index.d
 
-    expected_region = os.getenv("TEST_REGION")
+    def fake_embed_query(self, text):
+        rng = np.random.default_rng(abs(hash(text)) % (2**32))
+        return rng.random(dimension).tolist()
 
-    if not expected_region:
-        raise ValueError(
-            "⚠️ TEST_REGION n'est pas définie.\n"
-            "Exemple PowerShell :\n"
-            '$env:TEST_REGION="Réunion"'
-        )
+    monkeypatch.setattr(rag.MistralAIEmbeddings, "embed_query", fake_embed_query)
 
-    # ========================================================
-    # VÉRIFICATION DU FICHIER
-    # ========================================================
 
-    assert os.path.exists(VECTORS_FILE), (
-        "❌ events_with_vectors.pkl introuvable."
-    )
+def test_detect_city_finds_known_city(target_city):
+    """detect_city doit reconnaître une ville présente dans la base quand elle est citée."""
+    question = f"Quels événements à {target_city} ?"
+    detected = rag.detect_city(question)
+    assert detected is not None
+    assert detected.casefold() == target_city.casefold()
 
-    # ========================================================
-    # CHARGEMENT
-    # ========================================================
 
-    df = pd.read_pickle(VECTORS_FILE)
+def test_detect_city_returns_none_when_no_city_mentioned():
+    """detect_city ne doit pas halluciner une ville absente de la question."""
+    assert rag.detect_city("Quels événements intéressants en ce moment ?") is None
 
-    assert len(df) > 0, (
-        "❌ Aucun événement dans la base vectorielle."
-    )
 
-    print(
-        f"\n📊 Nombre d'événements : {len(df)}"
-    )
+def test_search_smart_filters_strictly_on_detected_city(target_city):
+    """
+    Règle métier 1 : quand une ville est détectée, TOUS les résultats
+    retournés par search_events_smart doivent appartenir à cette ville —
+    même si la base contient d'autres villes.
+    """
+    question = f"Quels événements à {target_city} ?"
+    results = rag.search_events_smart(question, k=5)
 
-    # ========================================================
-    # VÉRIFICATION DES COLONNES
-    # ========================================================
+    if results.empty:
+        pytest.skip(f"Aucun événement retourné pour '{target_city}'.")
 
-    required_columns = [
-        "firstdate_begin",
-        "location_city"
+    mismatched = results[
+        results["location_city"].str.casefold() != target_city.casefold()
     ]
 
-    for column in required_columns:
-
-        assert column in df.columns, (
-            f"❌ Colonne '{column}' absente."
-        )
-
-    # ========================================================
-    # VÉRIFICATION DES DATES
-    # ========================================================
-
-    df["firstdate_begin"] = pd.to_datetime(
-        df["firstdate_begin"],
-        errors="coerce",
-        format="mixed",    
-        utc=True
-        ).dt.tz_localize(None)
-
-
-    # --------------------------------------------------------
-    # Vérifier les dates invalides
-    # --------------------------------------------------------
-
-    invalid_dates = df[
-        df["firstdate_begin"].isna()
-    ]
-
-    assert invalid_dates.empty, (
-        "❌ Des événements possèdent une date invalide.\n"
-        f"Nombre de dates invalides : {len(invalid_dates)}\n"
-        f"Indices concernés : {invalid_dates.index.tolist()}"
+    assert mismatched.empty, (
+        f"{len(mismatched)} résultat(s) hors ville détectée '{target_city}' "
+        f"ont été retournés par search_events_smart :\n"
+        f"{mismatched['location_city'].tolist()}"
     )
 
-    # ========================================================
-    # VÉRIFICATION DE L'ANCIENNETÉ
-    # ========================================================
 
-    one_year_ago = (
-        datetime.now()
-        - timedelta(days=365)
+def test_search_smart_results_are_recent(target_city):
+    """
+    Règle métier 2 : tous les événements retournés pour une ville donnée
+    doivent dater de moins de DAYS_HISTORY jours.
+    """
+    question = f"Quels événements à {target_city} ?"
+    results = rag.search_events_smart(question, k=5)
+
+    if results.empty:
+        pytest.skip(f"Aucun événement retourné pour '{target_city}'.")
+
+    min_date = pd.Timestamp(datetime.now(), tz="UTC") - pd.Timedelta(days=DAYS_HISTORY)
+    dates = pd.to_datetime(results["firstdate_begin"], errors="coerce", utc=True)
+    too_old = results[dates < min_date]
+
+    assert too_old.empty, (
+        f"{len(too_old)} événement(s) retourné(s) pour '{target_city}' "
+        f"datent de plus de {DAYS_HISTORY} jours."
     )
 
-    old_events = df[
-        df["firstdate_begin"] < one_year_ago
-    ]
 
-    assert old_events.empty, (
-        "❌ Certains événements ont plus d'un an.\n"
-        f"Nombre d'événements trop anciens : "
-        f"{len(old_events)}"
-    )
-
-    # ========================================================
-    # VÉRIFICATION DES LOCALISATIONS
-    # ========================================================
-
-    cities = (
-        df["location_city"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-
-    cities = cities[
-        cities != ""
-    ]
-
-    assert len(cities) > 0, (
-        "❌ Aucune ville trouvée."
-    )
-
-    print(
-        "\n🏙️ Villes présentes :"
-    )
-
-    print(
-        cities.unique()
-    )
-
-    # ========================================================
-    # CAS TEST_REGION = RÉUNION
-    # ========================================================
-
-    if expected_region.lower() in [
-        "réunion",
-        "reunion"
-    ]:
-
-        # ----------------------------------------------------
-        # Villes principales de La Réunion
-        # ----------------------------------------------------
-
-        reunion_cities = [
-            "Saint-Denis",
-            "Saint-Pierre",
-            "Saint-Paul",
-            "Le Tampon",
-            "Saint-André",
-            "Saint-Louis",
-            "Saint-Joseph",
-            "Saint-Benoît"
-        ]
-
-        # ----------------------------------------------------
-        # Recherche des villes présentes
-        # ----------------------------------------------------
-
-        found_cities = [
-            city
-            for city in reunion_cities
-            if city.lower()
-            in [
-                c.lower()
-                for c in cities.unique()
-            ]
-        ]
-
-        assert len(found_cities) > 0, (
-            "❌ Aucun événement de La Réunion "
-            "n'a été trouvé dans la base.\n"
-            f"Villes trouvées : "
-            f"{list(cities.unique())}"
-        )
-
-        print(
-            "\n✅ Région 'Réunion' validée."
-        )
-
-        print(
-            "Villes de La Réunion trouvées :",
-            found_cities
-        )
-
-        return
-
-    # ========================================================
-    # CAS TEST_REGION = UNE VILLE
-    # ========================================================
-
-    expected_city = expected_region.strip()
-
-    matching_cities = [
-        city
-        for city in cities.unique()
-        if city.lower() == expected_city.lower()
-    ]
-
-    assert len(matching_cities) > 0, (
-        f"❌ Aucun événement ne correspond "
-        f"à '{expected_city}'.\n"
-        f"Localisations trouvées : "
-        f"{list(cities.unique())}"
-    )
-
-    print(
-        f"\n✅ Ville '{expected_city}' trouvée."
-    )
+def test_search_smart_without_city_does_not_crash():
+    """Une question sans ville détectée doit renvoyer une recherche FAISS classique, sans erreur."""
+    results = rag.search_events_smart("Quels événements intéressants en ce moment ?", k=5)
+    assert isinstance(results, pd.DataFrame)

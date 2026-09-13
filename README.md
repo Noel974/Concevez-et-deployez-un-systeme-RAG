@@ -47,3 +47,6 @@ Activation de l'environnement
 ```
 #### Deroulement 
 Création des scripts test , index, aganda, query , 
+
+
+$env:TEST_REGION="Saint-Denis"; pytest -v
