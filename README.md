@@ -40,7 +40,7 @@ pip install langchain faiss-cpu langchain-mistralai langchain-huggingface senten
 ## Réalisation
 Le projet fonctionne en 4 étapes séquentielles, chacune correspondant à un script :
 
-```
+``` bash 
 flowchart TD
 
     subgraph Collecte & Prétraitement
@@ -137,68 +137,6 @@ pip install -r requirements.txt
 
 ```
 #### Deroulement 
-Création des scripts test , index, aganda, query , embed
-Le script test permet de faire un test 
-
-un dossier test qui permet de tester le systeme rag 
-
-$env:TEST_REGION="Saint-Denis"; pytest -v
-
-
----
-
-## 3. Description des fichiers
-
-| Fichier | Rôle |
-|---|---|
-| **`aganda.py`** | Récupère les événements depuis une API (région/ville saisies par l'utilisateur), nettoie les dates, filtre sur une période (`DAYS_HISTORY`, 365 jours par défaut), construit un champ `text_for_embedding` (titre + description + ville + date), et fusionne avec l'historique existant (`data/processed/events.csv`) en supprimant les doublons par `uid`. |
-| **`embed.py`** | Charge `events.csv`, compare avec les vecteurs déjà calculés (`events_vectors.pkl`), et n'envoie à l'embedder (`utils/mistral.py` → fonction `embed_texts`) que les événements réellement nouveaux, avant de fusionner et sauvegarder. |
-| **`index.py`** | Charge les vecteurs, les empile dans une matrice NumPy, crée un index FAISS de type `IndexFlatL2` (recherche exacte par distance euclidienne) et le sauvegarde avec les métadonnées correspondantes. |
-| **`query.py`** | Point d'entrée du chatbot. Charge l'index FAISS et les métadonnées, encode la question utilisateur avec `MistralAIEmbeddings` (`mistral-embed`), récupère les `k=3` événements les plus proches, construit un prompt contextuel, et interroge `ChatMistralAI` (`mistral-large-latest`) pour générer la réponse finale. Boucle interactive en console (`exit` pour quitter). |
-| **`test.py`** | Script de vérification de l'environnement : teste les imports (FAISS, LangChain), vérifie si le support GPU FAISS est actif, teste un embedding avec HuggingFace (`all-MiniLM-L6-v2`) et un appel simple à `ChatMistralAI`. **À usage de diagnostic uniquement**, ne fait pas partie du pipeline de production. |
-| **`utils/mistral.py`** | Contient la fonction `embed_texts(texts: list[str]) -> list[list[float]]` : instancie `MistralAIEmbeddings("mistral-embed")` et calcule un vecteur pour chaque texte via `embed_query`, appelé en boucle depuis `embed.py`. |
-
----
-
-## 4. Prérequis et installation
-
-### Dépendances Python
-```bash
-pip install pandas requests python-dotenv faiss-cpu numpy langchain-mistralai langchain-huggingface
-```
-
-### Variables d'environnement (`.env`)
-```env
-API_BASE_URL=<url_de_l_api_evenements>
-DAYS_HISTORY=365
-MISTRAL_API_KEY=<votre_clé_api_mistral>
-```
-
-> ⚠️ **Important** : ne jamais coder une clé API en dur dans le code source (voir `test.py` actuellement). Utilisez systématiquement `os.getenv(...)`, et régénérez toute clé qui aurait été exposée par erreur.
-
-### Structure des dossiers attendue
-```
-projet/
-├── .env
-├── aganda.py
-├── embed.py
-├── index.py
-├── query.py
-├── test.py
-├── utils/
-│   └── mistral.py
-└── data/
-    └── processed/
-        ├── events.csv
-        ├── events_vectors.pkl
-        ├── events_with_vectors.pkl
-        └── faiss_index.bin
-```
-
----
-
-## 5. Utilisation
-
 Exécuter les scripts **dans l'ordre**, à chaque mise à jour des données :
 
 ```bash
@@ -217,8 +155,32 @@ python query.py
 
 Exemple d'interaction avec `query.py` :
 ```
-🧑‍💻 Ta question : Quels événements culturels à Lyon ce week-end ?
+🧑‍💻 Ta question : Quels événements culturels à Lyon?
 
 🤖 Réponse :
 D'après les événements disponibles...
 ```
+
+---
+
+## 3. Description des fichiers
+
+| Fichier | Rôle |
+|---|---|
+| **`aganda.py`** | Récupère les événements depuis une API (région/ville saisies par l'utilisateur), nettoie les dates, filtre sur une période (`DAYS_HISTORY`, 365 jours par défaut), construit un champ `text_for_embedding` (titre + description + ville + date), et fusionne avec l'historique existant (`data/processed/events.csv`) en supprimant les doublons par `uid`. |
+| **`embed.py`** | Charge `events.csv`, compare avec les vecteurs déjà calculés (`events_vectors.pkl`), et n'envoie à l'embedder (`utils/mistral.py` → fonction `embed_texts`) que les événements réellement nouveaux, avant de fusionner et sauvegarder. |
+| **`index.py`** | Charge les vecteurs, les empile dans une matrice NumPy, crée un index FAISS de type `IndexFlatL2` (recherche exacte par distance euclidienne) et le sauvegarde avec les métadonnées correspondantes. |
+| **`query.py`** | Point d'entrée du chatbot. Charge l'index FAISS et les métadonnées, encode la question utilisateur avec `MistralAIEmbeddings` (`mistral-embed`), récupère les `k=3` événements les plus proches, construit un prompt contextuel, et interroge `ChatMistralAI` (`mistral-large-latest`) pour générer la réponse finale. Boucle interactive en console (`exit` pour quitter). |
+| **`test.py`** | Script de vérification de l'environnement : teste les imports (FAISS, LangChain), vérifie si le support GPU FAISS est actif, teste un embedding avec HuggingFace (`all-MiniLM-L6-v2`) et un appel simple à `ChatMistralAI`. **À usage de diagnostic uniquement**, ne fait pas partie du pipeline de production. |
+| **`utils/mistral.py`** | Contient la fonction `embed_texts(texts: list[str]) -> list[list[float]]` : instancie `MistralAIEmbeddings("mistral-embed")` et calcule un vecteur pour chaque texte via `embed_query`, appelé en boucle depuis `embed.py`. |
+
+---
+
+### Variables d'environnement (`.env`)
+```env
+API_BASE_URL=<url_de_l_api_evenements>
+DAYS_HISTORY=365
+MISTRAL_API_KEY=<votre_clé_api_mistral>
+```
+
+> ⚠️ **Important** : ne jamais coder une clé API en dur dans le code source (voir `test.py` actuellement). Utilisez systématiquement `os.getenv(...)`, et régénérez toute clé qui aurait été exposée par erreur.
