@@ -138,16 +138,16 @@ Exécuter les scripts **dans l'ordre**, à chaque mise à jour des données :
 
 ```bash
 # 1. Récupérer les événements (demande une région et une ville en console)
-python aganda.py
+python Script/aganda.py
 
 # 2. Calculer les embeddings des nouveaux événements
-python embed.py
+python Script/embed.py
 
 # 3. (Re)construire l'index FAISS
-python index.py
+python Script/index.py
 
 # 4. Lancer le chatbot
-python query.py
+python Script/query.py
 ```
 
 Exemple d'interaction avec `query.py` :
@@ -181,3 +181,105 @@ MISTRAL_API_KEY=<votre_clé_api_mistral>
 ```
 
 > ⚠️ **Important** : ne jamais coder une clé API en dur dans le code source (voir `test.py` actuellement). Utilisez systématiquement `os.getenv(...)`, et régénérez toute clé qui aurait été exposée par erreur.
+ 
+## 4. Test
+**Tests unitaires**
+Le projet inclut un ensemble de tests automatisés permettant de vérifier la cohérence, la fraîcheur et la qualité des données ainsi que le bon fonctionnement du pipeline RAG.
+
+Lancer tous les tests :
+
+```bash
+$env:TEST_REGION="Saint-Denis"; pytest -v
+
+```
+
+**Structure des tests**
+tests/
+│
+├── test_context.py
+├── test_embeddings.py
+├── test_faiss.py
+├── test_ingestion.py
+├── test_metadata.py
+├── test_rag_data.py
+└── test_search.py
+
+**Description détaillée des tests**
+`test_context.py`
+Vérifie que la fonction build_context() construit correctement le contexte envoyé au LLM :
+
+structure correcte (titre, ville, dates, description, mots‑clés),
+
+absence de champs manquants,
+
+format propre et exploitable.
+
+> Garantit que le LLM reçoit un contexte fiable.
+
+`test_embeddings.py`
+Tests liés à la vectorisation :
+
+test_embeddings_file_exists → vérifie que events_vectors.pkl existe,
+
+test_embeddings_has_vectors → vérifie que des vecteurs sont présents,
+
+test_embeddings_vector_format → vérifie que les vecteurs sont bien des listes de floats.
+
+Garantit que les embeddings Mistral sont correctement générés et stockés.
+
+`test_faiss.py`
+Tests liés à l’index FAISS :
+
+test_faiss_index_exists → vérifie que faiss_index.bin existe,
+
+test_faiss_index_load → vérifie que l’index peut être chargé sans erreur.
+
+> Garantit que la base vectorielle est opérationnelle.
+
+`test_ingestion.py`
+Tests liés au script d’ingestion agenda.py :
+
+test_ingestion_file_exists → vérifie que events.csv existe,
+
+test_ingestion_has_rows → vérifie qu’il contient des événements,
+
+test_ingestion_uid_present → vérifie que chaque événement possède un uid,
+
+test_ingestion_text_for_embedding → vérifie que text_for_embedding est bien généré.
+
+> Garantit que les données sont propres, complètes et prêtes pour la vectorisation.
+
+`test_metadata.py` 
+Vérifie la cohérence entre :
+
+les vecteurs FAISS,
+
+les métadonnées events_with_vectors.pkl.
+
+Test principal :
+
+test_metadata_consistency
+
+> Garantit que FAISS et les métadonnées sont parfaitement synchronisés.
+
+`test_rag_data.py` 
+Tests métier du chatbot RAG :
+
+test_detect_city_finds_known_city → la ville est correctement détectée,
+
+test_detect_city_returns_none_when_no_city_mentioned → pas d’hallucination de ville,
+
+test_search_smart_filters_strictly_on_detected_city → filtrage strict par ville,
+
+test_search_smart_results_are_recent → les résultats sont récents (< DAYS_HISTORY),
+
+test_search_smart_without_city_does_not_crash → robustesse si aucune ville n’est détectée.
+
+> Garantit que le chatbot respecte les règles métier du projet.
+
+`test_search.py` 
+Tests de la recherche vectorielle :
+
+test_search_faiss → vérifie que FAISS retourne bien des résultats valides.
+
+> Garantit que la recherche sémantique fonctionne correctement.
