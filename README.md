@@ -40,34 +40,34 @@ pip install langchain faiss-cpu langchain-mistralai langchain-huggingface senten
 ## Réalisation
 Le projet fonctionne en 4 étapes séquentielles, chacune correspondant à un script :
 
-``` bash 
+
+```mermaid
 flowchart TD
 
-    subgraph Collecte & Prétraitement
-        A[agenda.py\nCollecte API\nFiltrage dates\nDéduplication par uid]
+    subgraph collecte["Collecte & Prétraitement"]
+        A["agenda.py<br/>Collecte API<br/>Filtrage dates<br/>Déduplication par uid"]
     end
 
-    subgraph Vectorisation
-        B[embed.py\nAppels Mistral\nGénération embeddings\nMise à jour events_vectors.pkl]
-        U[utils/mistral.py\nClient MistralAIEmbeddings]
+    subgraph vectorisation["Vectorisation"]
+        B["embed.py<br/>Appels Mistral<br/>Génération embeddings<br/>Mise à jour events_vectors.pkl"]
+        U["utils/mistral.py<br/>Client MistralAIEmbeddings"]
     end
 
-    subgraph Indexation
-        C[index.py\nConstruction index FAISS\nSynchronisation vecteurs + métadonnées]
+    subgraph indexation["Indexation"]
+        C["index.py<br/>Construction index FAISS<br/>Synchronisation vecteurs + métadonnées"]
     end
 
-    subgraph Chatbot RAG
-        D[query.py\nsearch_events_smart()\ndetect_city()\nbuild_context()\nask_chatbot()]
+    subgraph chatbot["Chatbot RAG"]
+        D["query.py<br/>search_events_smart<br/>detect_city<br/>build_context<br/>ask_chatbot"]
     end
 
-    subgraph Données
-        CSV[(events.csv)]
-        PKL1[(events_vectors.pkl)]
-        PKL2[(events_with_vectors.pkl)]
-        FAISS[(faiss_index.bin)]
+    subgraph donnees["Données"]
+        CSV[("events.csv")]
+        PKL1[("events_vectors.pkl")]
+        PKL2[("events_with_vectors.pkl")]
+        FAISS[("faiss_index.bin")]
     end
 
-    %% Flux de données
     A --> CSV
     A --> B
     B --> PKL1
@@ -77,20 +77,17 @@ flowchart TD
     PKL2 --> D
     FAISS --> D
 
-    %% Dépendances externes
-    API[(API OpenAgenda)]
-    MistralE[(Mistral Embed API)]
-    MistralLLM[(Mistral LLM API)]
+    API[("API OpenAgenda")]
+    MistralE[("Mistral Embed API")]
+    MistralLLM[("Mistral LLM API")]
 
     API --> A
     U --> B
     MistralE --> B
     MistralLLM --> D
 
-    %% Utilisateur
-    User([Utilisateur])
+    User(["Utilisateur"])
     User --> D
-
 ```
 
 1. **`aganda.py`** interroge l'API et sauvegarde les événements bruts dans `data/processed/events.csv`.
